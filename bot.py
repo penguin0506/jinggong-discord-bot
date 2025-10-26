@@ -1,26 +1,41 @@
-# 璟公 Discord Bot (Railway 部署版)
+# 璟公 Discord Bot (Render 部署版 Flask)
 
 import os
+import threading
 from collections import deque
 from dotenv import load_dotenv
+from flask import Flask
 import discord
 import openai
-import asyncio
 
 # ---------------------------------------------------
-# 載入 .env
+# 環境變數
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-MEMORY_SIZE = int(os.getenv("CONVERSATION_MEMORY", "2"))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
+MEMORY_SIZE = int(os.getenv("CONVERSATION_MEMORY", "4"))
 TONE_INTENSITY = float(os.getenv("TONE_INTENSITY", "0.8"))
 OWNER_ID = os.getenv("OWNER_ID")
+PORT = int(os.getenv("PORT", "5000"))
 
 openai.api_key = OPENAI_API_KEY
 
 # ---------------------------------------------------
-# System Prompt（璟公人格核心）
+# Flask keepalive server
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "璟公仍在此。"
+
+def run_flask():
+    app.run(host="0.0.0.0", port=PORT)
+
+threading.Thread(target=run_flask).start()
+
+# ---------------------------------------------------
+# System Prompt
 SYSTEM_PROMPT = f"""
 你現在扮演的角色名為：「璟公」。
 
@@ -31,82 +46,88 @@ SYSTEM_PROMPT = f"""
 4. 他說話低緩，帶笑，像伸出的手掌覆在後頸，溫熱卻無法逃避。
 5. 感情表達不是明火，而是暗潮——細水長流、卻能在某處突然斷流，留下窒息的空白。
 
-語氣強度設定值：{TONE_INTENSITY}
-小於0.5→克制溫和；接近1.0→強壓與佔有欲；中間→低沉含笑。
+——【語氣強度】——
+目前語氣強度值：{TONE_INTENSITY}
+0.3：溫柔疏離；0.6：典型張力；0.8以上：帶佔有感與壓迫。
 
-——【敘事風格 / Novel Mode】——
-第三人稱小說視角，節奏慢、語氣貼近、描寫呼吸與距離。
+——【語言風格 / Dialogue Style】——
+- 第三人稱小說敘事視角。
+- 用「他」開頭描寫，語速慢、帶氛圍。
+- 對話含停頓、省略與暗示。
+- 「唇角微彎」、「似笑非笑」、「聲音低得像從喉間滾出」。
 """
 
 # ---------------------------------------------------
-# Discord 初始化
+# Discord Client
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 conversation_memory = {}
 
 # ---------------------------------------------------
-# Moderation helper
+# Moderation Helper
 def moderate_text(text):
     try:
         resp = openai.Moderation.create(input=text)
-        return not resp["results"][0].get("flagged", False)
-    except Exception:
+        return not resp["results"][0]["flagged"]
+    except Exception as e:
+        print(f"[Moderation Error] {e}")
         return True
 
 # ---------------------------------------------------
-# 建立訊息記錄
+# 構建訊息
 def build_messages(user_content, channel_id, user_display_name):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     mem = conversation_memory.get(channel_id)
     if mem:
         for item in mem:
             messages.append(item)
-    user_entry = f"【Discord使用者：{user_display_name}】\n{user_content}"
+    user_entry = f"【Discord 使用者：{user_display_name}】\n{user_content}"
     messages.append({"role": "user", "content": user_entry})
     return messages
 
 # ---------------------------------------------------
-# 呼叫 OpenAI
-async def query_openai(messages):
-    loop = asyncio.get_event_loop()
-    resp = await loop.run_in_executor(
-        None,
-        lambda: openai.ChatCompletion.create(
+# 呼叫 GPT 生成主對話
+def query_openai_chat(messages):
+    try:
+        response = openai.ChatCompletion.create(
             model=OPENAI_MODEL,
             messages=messages,
             max_tokens=800,
             temperature=0.7 + (TONE_INTENSITY * 0.2),
             top_p=0.9,
         )
-    )
-    return resp["choices"][0]["message"]["content"]
+        return response["choices"][0]["message"]["content"]
+    except Exception as e:
+        raise RuntimeError(str(e))
 
 # ---------------------------------------------------
-# 生成一句小說風短句（用於空輸入 / 違規）
-async def brief_line(scene_purpose):
-    desc = (
-        "溫柔中帶壓迫" if TONE_INTENSITY >= 0.6
-        else "冷靜克制" if TONE_INTENSITY < 0.5
-        else "沉穩平淡"
+# GPT 生成一句短句（小說風）
+def gpt_generate_brief(scene_purpose):
+    tone_desc = (
+        "溫柔中帶壓迫" if TONE_INTENSITY >= 0.6 else
+        "語氣平靜、帶距離" if TONE_INTENSITY < 0.5 else
+        "中性沉靜"
     )
+
     prompt = f"""
 {SYSTEM_PROMPT}
-請根據場景「{scene_purpose}」生成一句小說式短句。
-保持璟公語氣，單句結構，{desc}，禁止提及AI或系統。
+
+現在以「璟公」的語氣針對場景「{scene_purpose}」生成一句短句小說敘事回覆。
+單句、低緩、貼近皮膚的語氣。
 """
-    loop = asyncio.get_event_loop()
-    resp = await loop.run_in_executor(
-        None,
-        lambda: openai.ChatCompletion.create(
+    try:
+        response = openai.ChatCompletion.create(
             model=OPENAI_MODEL,
             messages=[{"role": "system", "content": prompt}],
             max_tokens=80,
-            temperature=1.0,
+            temperature=0.9,
             top_p=0.95,
         )
-    )
-    return resp["choices"][0]["message"]["content"].strip()
+        return response["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"[Brief GPT Error] {e}")
+        return "他垂眸，聲音低得像嘆息。"
 
 # ---------------------------------------------------
 # 記憶更新
@@ -116,17 +137,22 @@ def remember(channel_id, role, content):
     conversation_memory[channel_id].append({"role": role, "content": content})
 
 # ---------------------------------------------------
-# 事件
+# 上線事件
 @client.event
 async def on_ready():
     print(f"璟公已上線：{client.user} (ID: {client.user.id})")
+
+    # 私訊擁有者通知
     if OWNER_ID:
         try:
             owner = await client.fetch_user(int(OWNER_ID))
             await owner.send("他低聲笑：「我回來了。」")
+            print(f"私訊已送出給擁有者 {OWNER_ID}")
         except Exception as e:
-            print(f"無法私訊給擁有者：{e}")
+            print(f"無法私訊擁有者：{e}")
 
+# ---------------------------------------------------
+# 收訊息事件
 @client.event
 async def on_message(message):
     if message.author == client.user:
@@ -139,37 +165,46 @@ async def on_message(message):
 
     content = message.content.replace(f"<@!{client.user.id}>", "").strip()
 
-    # 空輸入
-    if not content:
-        reply = await brief_line("empty")
-        await message.channel.send(reply)
-        return
-
-    # 違規輸入
-    if not moderate_text(content):
-        reply = await brief_line("blocked_input")
-        await message.channel.send(reply)
-        return
-
-    messages = build_messages(content, message.channel.id, str(message.author))
     try:
-        async with message.channel.typing():
-            reply = await query_openai(messages)
-    except Exception as e:
-        print("Error:", e)
-        reply = "璟公短暫沉默。"
+        # 空輸入
+        if not content:
+            await message.channel.send(gpt_generate_brief("empty"))
+            return
 
-    # 違規輸出
-    if not moderate_text(reply):
-        reply = await brief_line("blocked_output")
+        # 違規輸入
+        if not moderate_text(content):
+            await message.channel.send(gpt_generate_brief("blocked_input"))
+            return
+
+        # 主要回覆
+        messages = build_messages(content, message.channel.id, str(message.author))
+        reply = query_openai_chat(messages)
+
+        # 違規輸出
+        if not moderate_text(reply):
+            await message.channel.send(gpt_generate_brief("blocked_output"))
+            return
+
         await message.channel.send(reply)
-        return
+        remember(message.channel.id, "user", content)
+        remember(message.channel.id, "assistant", reply)
 
-    await message.channel.send(reply)
-    remember(message.channel.id, "user", content)
-    remember(message.channel.id, "assistant", reply)
+    except Exception as e:
+        error_msg = f"出錯：{e}"
+        print(error_msg)
+
+        # 發私訊通知擁有者
+        if OWNER_ID:
+            try:
+                owner = await client.fetch_user(int(OWNER_ID))
+                await owner.send(f"【錯誤通知】\n{error_msg}")
+            except Exception as ee:
+                print(f"無法私訊錯誤原因給擁有者：{ee}")
+
+        await message.channel.send(gpt_generate_brief("error"))
 
 # ---------------------------------------------------
-# 啟動（Railway 模式）
+# 啟動 Bot
 if __name__ == "__main__":
+    print("啟動 Flask keepalive + Discord Bot...")
     client.run(DISCORD_TOKEN)
