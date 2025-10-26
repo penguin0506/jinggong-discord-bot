@@ -102,12 +102,17 @@ async def query_openai_chat(messages):
 # ---------------------------------------------------
 # GPT 生成一句短句（小說風）
 def gpt_generate_brief(scene_purpose):
+    tone_desc = (
+        "溫柔中帶壓迫" if TONE_INTENSITY >= 0.6 else
+        "語氣平靜、帶距離" if TONE_INTENSITY < 0.5 else
+        "中性沉靜"
+    )
+
     prompt = f"""
 {SYSTEM_PROMPT}
 
-場景：「{scene_purpose}」
-請以璟公的語氣生成一句自然的短句小說敘事風格回覆，
-語氣需延續他的一貫特質與情緒。
+現在以「璟公」的語氣針對場景「{scene_purpose}」生成一句短句小說敘事回覆。
+單句、低緩、貼近皮膚的語氣。
 """
     try:
         response = client_ai.chat.completions.create(
@@ -130,16 +135,41 @@ def remember(channel_id, role, content):
     conversation_memory[channel_id].append({"role": role, "content": content})
 
 # ---------------------------------------------------
+# API 狀態偵測（在上線時檢查配額是否可用）
+def check_openai_quota():
+    try:
+        # 嘗試呼叫一個極小的測試請求
+        response = client_ai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": "ping"}],
+            max_tokens=1,
+        )
+        print("OpenAI API 狀態正常，璟公可以說話。")
+        return True
+    except Exception as e:
+        print(f"OpenAI API 檢測失敗：{e}")
+        if "insufficient_quota" in str(e):
+            return "quota"
+        return False
+
+# ---------------------------------------------------
 # 上線事件
 @client.event
 async def on_ready():
     print(f"璟公已上線：{client.user} (ID: {client.user.id})")
 
+    api_status = check_openai_quota()
+
     # 私訊擁有者通知
     if OWNER_ID:
         try:
             owner = await client.fetch_user(int(OWNER_ID))
-            await owner.send("他低聲笑：「本公回來了。」")
+            if api_status == True:
+                await owner.send("他低聲笑：「我回來了。」")
+            elif api_status == "quota":
+                await owner.send("他抬眼淡淡道：「糧食已盡，無法再言。」（API 配額不足）")
+            else:
+                await owner.send("他沉默片刻：「似乎有人掐住了喉嚨……」（OpenAI API 無回應）")
             print(f"私訊已送出給擁有者 {OWNER_ID}")
         except Exception as e:
             print(f"無法私訊擁有者：{e}")
@@ -161,12 +191,12 @@ async def on_message(message):
     try:
         # 空輸入
         if not content:
-            await message.channel.send(gpt_generate_brief("使用者空白訊息"))
+            await message.channel.send(gpt_generate_brief("empty"))
             return
 
         # 違規輸入
         if not moderate_text(content):
-            await message.channel.send(gpt_generate_brief("輸入內容違規"))
+            await message.channel.send(gpt_generate_brief("blocked_input"))
             return
 
         # 主要回覆
@@ -175,7 +205,7 @@ async def on_message(message):
 
         # 違規輸出
         if not moderate_text(reply):
-            await message.channel.send(gpt_generate_brief("模型回覆違規"))
+            await message.channel.send(gpt_generate_brief("blocked_output"))
             return
 
         await message.channel.send(reply)
@@ -194,7 +224,7 @@ async def on_message(message):
             except Exception as ee:
                 print(f"無法私訊錯誤原因給擁有者：{ee}")
 
-        await message.channel.send(gpt_generate_brief("發生錯誤"))
+        await message.channel.send(gpt_generate_brief("error"))
 
 # ---------------------------------------------------
 # 啟動 Bot
