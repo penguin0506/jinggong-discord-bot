@@ -1,4 +1,4 @@
-# 璟公 Discord Bot (Render 部署版 Flask)
+# 璟公 Discord Bot (Render 部署版 Flask - 新版 OpenAI SDK 1.x)
 
 import os
 import threading
@@ -6,7 +6,7 @@ from collections import deque
 from dotenv import load_dotenv
 from flask import Flask
 import discord
-import openai
+from openai import OpenAI
 
 # ---------------------------------------------------
 # 環境變數
@@ -19,7 +19,7 @@ TONE_INTENSITY = float(os.getenv("TONE_INTENSITY", "0.8"))
 OWNER_ID = os.getenv("OWNER_ID")
 PORT = int(os.getenv("PORT", "5000"))
 
-openai.api_key = OPENAI_API_KEY
+client_ai = OpenAI(api_key=OPENAI_API_KEY)
 
 # ---------------------------------------------------
 # Flask keepalive server
@@ -65,11 +65,11 @@ client = discord.Client(intents=intents)
 conversation_memory = {}
 
 # ---------------------------------------------------
-# Moderation Helper
+# Moderation Helper (新版 SDK)
 def moderate_text(text):
     try:
-        resp = openai.Moderation.create(input=text)
-        return not resp["results"][0]["flagged"]
+        resp = client_ai.moderations.create(model="omni-moderation-latest", input=text)
+        return not resp.results[0].flagged
     except Exception as e:
         print(f"[Moderation Error] {e}")
         return True
@@ -87,44 +87,37 @@ def build_messages(user_content, channel_id, user_display_name):
     return messages
 
 # ---------------------------------------------------
-# 呼叫 GPT 生成主對話
-def query_openai_chat(messages):
+# 呼叫 GPT 生成主對話（新版）
+async def query_openai_chat(messages):
     try:
-        response = openai.ChatCompletion.create(
+        response = client_ai.chat.completions.create(
             model=OPENAI_MODEL,
             messages=messages,
-            max_tokens=800,
-            temperature=0.7 + (TONE_INTENSITY * 0.2),
-            top_p=0.9,
         )
-        return response["choices"][0]["message"]["content"]
+        return response.choices[0].message.content
     except Exception as e:
-        raise RuntimeError(str(e))
+        print(f"OpenAI Error: {e}")
+        return f"【錯誤通知】\n出錯：{e}"
 
 # ---------------------------------------------------
 # GPT 生成一句短句（小說風）
 def gpt_generate_brief(scene_purpose):
-    tone_desc = (
-        "溫柔中帶壓迫" if TONE_INTENSITY >= 0.6 else
-        "語氣平靜、帶距離" if TONE_INTENSITY < 0.5 else
-        "中性沉靜"
-    )
-
     prompt = f"""
 {SYSTEM_PROMPT}
 
-現在以「璟公」的語氣針對場景「{scene_purpose}」生成一句短句小說敘事回覆。
-單句、低緩、貼近皮膚的語氣。
+場景：「{scene_purpose}」
+請以璟公的語氣生成一句自然的短句小說敘事風格回覆，
+語氣需延續他的一貫特質與情緒。
 """
     try:
-        response = openai.ChatCompletion.create(
+        response = client_ai.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[{"role": "system", "content": prompt}],
             max_tokens=80,
             temperature=0.9,
             top_p=0.95,
         )
-        return response["choices"][0]["message"]["content"].strip()
+        return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"[Brief GPT Error] {e}")
         return "他垂眸，聲音低得像嘆息。"
@@ -146,7 +139,7 @@ async def on_ready():
     if OWNER_ID:
         try:
             owner = await client.fetch_user(int(OWNER_ID))
-            await owner.send("他低聲笑：「我回來了。」")
+            await owner.send("他低聲笑：「本公回來了。」")
             print(f"私訊已送出給擁有者 {OWNER_ID}")
         except Exception as e:
             print(f"無法私訊擁有者：{e}")
@@ -168,21 +161,21 @@ async def on_message(message):
     try:
         # 空輸入
         if not content:
-            await message.channel.send(gpt_generate_brief("empty"))
+            await message.channel.send(gpt_generate_brief("使用者空白訊息"))
             return
 
         # 違規輸入
         if not moderate_text(content):
-            await message.channel.send(gpt_generate_brief("blocked_input"))
+            await message.channel.send(gpt_generate_brief("輸入內容違規"))
             return
 
         # 主要回覆
         messages = build_messages(content, message.channel.id, str(message.author))
-        reply = query_openai_chat(messages)
+        reply = await query_openai_chat(messages)
 
         # 違規輸出
         if not moderate_text(reply):
-            await message.channel.send(gpt_generate_brief("blocked_output"))
+            await message.channel.send(gpt_generate_brief("模型回覆違規"))
             return
 
         await message.channel.send(reply)
@@ -201,7 +194,7 @@ async def on_message(message):
             except Exception as ee:
                 print(f"無法私訊錯誤原因給擁有者：{ee}")
 
-        await message.channel.send(gpt_generate_brief("error"))
+        await message.channel.send(gpt_generate_brief("發生錯誤"))
 
 # ---------------------------------------------------
 # 啟動 Bot
