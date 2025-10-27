@@ -6,6 +6,7 @@ from collections import deque
 from dotenv import load_dotenv
 from flask import Flask
 import discord
+import asyncio
 from openai import OpenAI
 
 # ---------------------------------------------------
@@ -30,7 +31,10 @@ def home():
     return "璟公仍在此。"
 
 def run_flask():
+    import time
+    time.sleep(5)  # 等待 Discord 初始化完成後再開 Flask
     app.run(host="0.0.0.0", port=PORT)
+
 
 threading.Thread(target=run_flask).start()
 
@@ -87,17 +91,26 @@ def build_messages(user_content, channel_id, user_display_name):
     return messages
 
 # ---------------------------------------------------
-# 呼叫 GPT 生成主對話（新版）
-async def query_openai_chat(messages):
-    try:
-        response = client_ai.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=messages,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        print(f"OpenAI Error: {e}")
-        return f"【錯誤通知】\n出錯：{e}"
+# 呼叫 GPT 生成主對話
+async def query_openai_chat(messages, retries=3):
+    for attempt in range(retries):
+        try:
+            response = client_ai.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=messages,
+            )
+            return response.choices[0].message.content
+
+        except Exception as e:
+            if "429" in str(e):
+                wait = (attempt + 1) * 5
+                print(f"[RateLimit] 第 {attempt+1} 次限速，等待 {wait} 秒重試。")
+                await asyncio.sleep(wait)
+                continue
+            print(f"OpenAI Error: {e}")
+            return f"【錯誤通知】\n出錯：{e}"
+
+    return "【錯誤通知】多次嘗試後仍無法連線 OpenAI API。"
 
 # ---------------------------------------------------
 # GPT 生成一句短句（小說風）
@@ -158,6 +171,7 @@ def check_openai_quota():
 async def on_ready():
     print(f"璟公已上線：{client.user} (ID: {client.user.id})")
 
+    await asyncio.sleep(5)  # 延遲，等 Render 網路穩定
     api_status = check_openai_quota()
 
     # 私訊擁有者通知
