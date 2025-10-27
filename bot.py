@@ -32,7 +32,7 @@ def home():
 
 def run_flask():
     import time
-    time.sleep(5)  # 等待 Discord 初始化完成後再開 Flask
+    time.sleep(10)  # 延遲開 Flask
     app.run(host="0.0.0.0", port=PORT)
 
 
@@ -65,7 +65,9 @@ SYSTEM_PROMPT = f"""
 # Discord Client
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
+intents.guilds = True
+intents.members = False
+client = discord.Client(intents=intents, heartbeat_timeout=120)
 conversation_memory = {}
 
 # ---------------------------------------------------
@@ -171,8 +173,11 @@ def check_openai_quota():
 async def on_ready():
     print(f"璟公已上線：{client.user} (ID: {client.user.id})")
 
-    await asyncio.sleep(5)  # 延遲，等 Render 網路穩定
+    # Discord Gateway 啟動後給他緩衝
+    await asyncio.sleep(15)
+
     api_status = check_openai_quota()
+    print("開始檢查 API 狀態...")
 
     # 私訊擁有者通知
     if OWNER_ID:
